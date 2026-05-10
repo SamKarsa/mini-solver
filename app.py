@@ -1,6 +1,6 @@
 # app.py
 import streamlit as st
-from ui.componentes import (
+from ui.components import (
     apply_styles,
     render_header,
     render_help,
