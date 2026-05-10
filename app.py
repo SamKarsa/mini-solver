@@ -20,16 +20,22 @@ apply_styles()
 render_header()
 render_help()
 
-col_input, col_results = st.columns([1, 1], gap="large")
+model = render_model_input()
 
-with col_input:
-    model = render_model_input()
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("⚡ Resolver"):
+st.markdown("<br>", unsafe_allow_html=True)
+
+btn_solve_col, btn_clear_col, _ = st.columns([2, 1, 5])
+with btn_solve_col:
+    if st.button("Resolver", type="primary"):
         st.session_state.result = solve(model)
+with btn_clear_col:
+    if st.button("Limpiar", key="clear_btn"):
+        st.session_state.clear()
+        st.rerun()
 
-with col_results:
-    if "result" in st.session_state and st.session_state.result:
-        render_results(st.session_state.result)
-    else:
-        render_empty_results()
+st.markdown("<br>", unsafe_allow_html=True)
+
+if "result" in st.session_state and st.session_state.result is not None:
+    render_results(st.session_state.result)
+else:
+    render_empty_results()
