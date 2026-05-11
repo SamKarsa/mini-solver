@@ -16,6 +16,111 @@ def clear_session_keep_mode():
     st.session_state.ai_textarea_version = ai_textarea_version
 
 
+_AI_ERROR_MESSAGES = {
+    "api": (
+        "Servicio temporalmente no disponible",
+        "No pude conectarme con el servicio de IA. Revisa tu conexión a internet "
+        "e intenta de nuevo en unos segundos. Si persiste, verifica que la API key "
+        "de Groq esté configurada correctamente."
+    ),
+    "parse": (
+        "Respuesta inválida del modelo",
+        "La IA devolvió algo que no pude leer. Intenta reformular el problema "
+        "con frases más simples y directas."
+    ),
+    "interpret": (
+        "No pude entender el problema",
+        "Asegúrate de incluir en tu descripción: "
+        "(1) qué deseas optimizar (maximizar o minimizar), "
+        "(2) las variables o productos involucrados, "
+        "(3) al menos una restricción (límite de recursos, capacidad, etc.)."
+    ),
+    "invalid": (
+        "El modelo extraído está incompleto",
+        "La IA construyó un modelo con datos inconsistentes (por ejemplo, "
+        "faltan coeficientes en alguna restricción). Intenta dar más detalle "
+        "sobre cada variable y cuánto consume de cada recurso."
+    ),
+}
+
+
+def _render_ai_error(err: dict):
+    """Renderiza un error de parse_problem con título amigable, hint accionable
+    y un expander con el detalle técnico (para debugging)."""
+    kind = err.get("kind", "")
+    technical = err.get("technical", "")
+    title, hint = _AI_ERROR_MESSAGES.get(
+        kind,
+        ("Algo salió mal", "Intenta de nuevo en unos momentos.")
+    )
+
+    st.markdown(
+        f'<div style="background:#fef2f2;border:1px solid #fecaca;'
+        f'border-left:4px solid {C["red"]};border-radius:8px;'
+        f'padding:14px 18px;margin:12px 0;">'
+        f'<div style="font-family:DM Sans,sans-serif;font-weight:600;'
+        f'color:{C["red"]};font-size:0.95rem;margin-bottom:6px;">'
+        f'{title}</div>'
+        f'<div style="font-family:DM Sans,sans-serif;color:{C["text2"]};'
+        f'font-size:0.85rem;line-height:1.6;">{hint}</div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+
+    if technical:
+        with st.expander("Ver detalle técnico"):
+            st.code(technical, language="text")
+
+
+def edit_ai_model_in_manual():
+    """Lleva el modelo interpretado por la IA al modo Manual para editarlo:
+    setea todas las keys de widgets del modo Manual con los valores extraídos
+    y cambia el modo a 'Manual'."""
+    if "ai_model_display" not in st.session_state:
+        return
+    model = st.session_state.ai_model_display
+    ai_result = st.session_state.get("ai_result")
+
+    # Limpiar estado previo del modo Manual (preservar el modo)
+    manual_keys = []
+    for k in list(st.session_state.keys()):
+        if k in ("n_vars", "n_restrictions", "sense", "result"):
+            manual_keys.append(k)
+        elif k.startswith(("obj_", "var_name_")):
+            manual_keys.append(k)
+        elif len(k) > 1 and k[0] == "r" and k[1:].split("_")[0].isdigit():
+            manual_keys.append(k)
+    for k in manual_keys:
+        del st.session_state[k]
+
+    # Configuración general
+    st.session_state["n_vars"] = len(model.variables)
+    st.session_state["n_restrictions"] = len(model.restrictions)
+    st.session_state["sense"] = model.sense
+
+    # Nombres de variables
+    for i, name in enumerate(model.variables):
+        st.session_state[f"var_name_{i}"] = name
+
+    # Coeficientes de la función objetivo
+    for i, coef in enumerate(model.objective_coefficients):
+        st.session_state[f"obj_{i}"] = float(coef)
+
+    # Restricciones
+    for r_idx, restriction in enumerate(model.restrictions):
+        for i, coef in enumerate(restriction.coefficients):
+            st.session_state[f"r{r_idx}_c{i}"] = float(coef)
+        st.session_state[f"r{r_idx}_type"] = restriction.type
+        st.session_state[f"r{r_idx}_rhs"] = float(restriction.rhs)
+
+    # Conservar el resultado de la IA como resultado del modo Manual
+    if ai_result is not None:
+        st.session_state["result"] = ai_result
+
+    # Cambiar al modo Manual
+    st.session_state["mode"] = "Manual"
+
+
 _FONTS_URL = (
     "https://fonts.googleapis.com/css2?"
     "family=DM+Serif+Display&"
@@ -164,6 +269,13 @@ def apply_styles():
                 color: {C['text2']} !important;
                 margin: 0 !important;
             }}
+            /* Botón Editar en Manual: secundario pero más ancho */
+            .st-key-edit_manual_btn button {{
+                width: 200px !important;
+                min-width: 200px !important;
+                max-width: 200px !important;
+            }}
+
             /* Opción seleccionada: borde y texto índigo */
             .stRadio [role="radiogroup"] > label:has(input:checked) {{
                 background: {C['input']} !important;
@@ -471,28 +583,20 @@ def apply_styles():
 
 
 def render_header():
-    st.markdown(f"""
-        <div style="margin-bottom: 32px;">
-            <div style="
-                font-family: 'DM Serif Display', serif;
-                font-size: 3rem;
-                color: {C['text']};
-                line-height: 1;
-                letter-spacing: -1px;
-                margin-bottom: 8px;
-            ">
-                LP <span style="color:{C['indigo']};">Solver</span>
-            </div>
-            <div style="
-                font-family: 'JetBrains Mono', monospace;
-                font-size: 0.75rem;
-                color: {C['text3']};
-                letter-spacing: 0.5px;
-            ">
-                linear programming optimizer &middot; powered by HiGHS &middot; v1.0.0
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+    # HTML flush-left: markdown trata >=4 espacios al inicio como bloque de código
+    st.markdown(
+        f'<div style="margin-bottom:32px;">'
+        f'<div style="font-family:\'DM Serif Display\',serif;font-size:3rem;'
+        f'color:{C["text"]};line-height:1;letter-spacing:-1px;margin-bottom:8px;">'
+        f'LP <span style="color:{C["indigo"]};">Solver</span>'
+        f'</div>'
+        f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.75rem;'
+        f'color:{C["text3"]};letter-spacing:0.5px;">'
+        f'linear programming optimizer &middot; powered by HiGHS &middot; v1.0.0'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
 
 
 _HELP_HTML = (
@@ -502,8 +606,13 @@ f"""<div style="font-family:'DM Sans',sans-serif; color:{C['text2']}; font-size:
 s.a.     a₁₁·x₁ + a₁₂·x₂ + ... ≤ b₁
          a₂₁·x₁ + a₂₂·x₂ + ... ≥ b₂
          xᵢ ≥ 0   (no negatividad, implícita)</p>
-<p><strong style="color:{C['text']};">Cómo usar:</strong> configura el número de variables y el sentido → ingresa los coeficientes en la tabla → presiona <strong>Resolver</strong>.</p>
-<p><strong style="color:{C['text']};">Holgura:</strong> valor <code>RHS − LHS</code> de cada restricción. Si es ≈ 0, la restricción está <strong>Activa</strong> (cuello de botella). Si es &gt; 0, está <strong>Inactiva</strong> (recurso sobrante).</p>
+<p style="margin-top:18px;"><strong style="color:{C['text']};">Dos modos de uso</strong></p>
+<p><strong style="color:{C['indigo']};">Modo Manual</strong> — configura el número de variables y el sentido (max/min), llena la tabla con los coeficientes de la función objetivo (fila <span style="color:{C['orange']};font-weight:600;">Z</span>) y cada restricción (filas <strong>R1, R2, ...</strong>), elige el tipo (≤, ≥, =) y el RHS, y presiona <strong>Resolver</strong>. Con los botones <strong>+ restricción</strong> / <strong>− restricción</strong> agregas o quitas filas.</p>
+<p><strong style="color:{C['indigo']};">Modo IA</strong> — describe el problema en lenguaje natural (por ejemplo: <em>"Una fábrica produce sillas y mesas..."</em>) y presiona <strong>Interpretar y Resolver</strong>. La IA extrae automáticamente las variables, la función objetivo y las restricciones. Como la interpretación puede contener errores, después podés usar <strong>Editar en Manual →</strong> para llevar el modelo extraído a la tabla del modo Manual y ajustar cualquier valor antes de re-resolver.</p>
+<p><strong style="color:{C['text']};">Limpiar</strong> — el botón <strong>Limpiar</strong> resetea todo (variables, coeficientes, descripción del problema, resultados) manteniendo el modo actual. Útil cuando quieras empezar un problema nuevo desde cero.</p>
+<p style="margin-top:18px;"><strong style="color:{C['text']};">Cómo leer los resultados</strong></p>
+<p><strong>Valor óptimo Z</strong>: el mejor resultado que cumple todas las restricciones. <strong>Variables</strong>: los valores de cada xᵢ que producen ese óptimo.</p>
+<p><strong>Holgura</strong>: <code>RHS − LHS</code> de cada restricción. Si es ≈ 0 la restricción está <strong>Activa</strong> (cuello de botella, está al límite). Si es &gt; 0 está <strong>Inactiva</strong> (te sobra ese recurso).</p>
 </div>"""
 )
 
@@ -521,9 +630,10 @@ def render_model_input():
 
         col1, col2, _ = st.columns([1, 1, 3])
         with col1:
+            st.session_state.setdefault("n_vars", 2)
             n_vars = st.number_input(
                 "Número de variables",
-                min_value=1, max_value=20, value=2, step=1,
+                min_value=1, max_value=20, step=1,
                 key="n_vars"
             )
         with col2:
@@ -543,9 +653,11 @@ def render_model_input():
             for i, col in enumerate(cols):
                 idx = start + i
                 with col:
+                    key = f"var_name_{idx}"
+                    st.session_state.setdefault(key, f"x{idx+1}")
                     name = st.text_input(
-                        f"v{idx+1}", value=f"x{idx+1}",
-                        key=f"var_name_{idx}",
+                        f"v{idx+1}",
+                        key=key,
                         label_visibility="collapsed"
                     )
                     var_names.append(name)
@@ -630,8 +742,10 @@ def render_model_input():
                 )
             for i in range(n_vars):
                 with fo_cols[i+1]:
+                    key = f"obj_{i}"
+                    st.session_state.setdefault(key, 1.0)
                     c = st.number_input(
-                        f"fo_{i}", value=1.0, key=f"obj_{i}",
+                        f"fo_{i}", key=key,
                         format="%.2f", label_visibility="collapsed"
                     )
                     obj_coeffs.append(c)
@@ -663,8 +777,10 @@ def render_model_input():
                 coeffs = []
                 for i in range(n_vars):
                     with r_cols[i+1]:
+                        key = f"r{r}_c{i}"
+                        st.session_state.setdefault(key, 1.0)
                         c = st.number_input(
-                            f"r{r}_c{i}", value=1.0, key=f"r{r}_c{i}",
+                            f"r{r}_c{i}", key=key,
                             format="%.2f", label_visibility="collapsed"
                         )
                         coeffs.append(c)
@@ -676,8 +792,10 @@ def render_model_input():
                     )
 
                 with r_cols[n_vars+2]:
+                    rhs_key = f"r{r}_rhs"
+                    st.session_state.setdefault(rhs_key, 10.0)
                     rhs = st.number_input(
-                        f"rhs_r{r}", value=10.0, key=f"r{r}_rhs",
+                        f"rhs_r{r}", key=rhs_key,
                         format="%.2f", label_visibility="collapsed"
                     )
 
@@ -696,8 +814,12 @@ def render_model_input():
                 st.session_state.n_restrictions += 1
                 st.rerun()
         with btn_col2:
-            if st.button("− restricción", key="rm_r", type="secondary") \
-                    and st.session_state.n_restrictions > 1:
+            if st.button(
+                "− restricción",
+                key="rm_r",
+                type="secondary",
+                disabled=st.session_state.n_restrictions <= 1,
+            ):
                 st.session_state.n_restrictions -= 1
                 st.rerun()
 
@@ -787,24 +909,19 @@ def render_results(result):
 
 
 def render_empty_results():
-    st.markdown(f"""
-        <div style="
-            text-align: center;
-            padding: 48px 24px;
-            color: {C['text3']};
-            font-family: 'DM Sans', sans-serif;
-            font-size: 0.88rem;
-            border: 1px dashed {C['border2']};
-            border-radius: 12px;
-            margin-top: 8px;
-        ">
-            <div style="font-size:2rem;margin-bottom:12px;opacity:0.3;">∑</div>
-            <div>Los resultados aparecerán aquí</div>
-            <div style="font-size:0.78rem;color:{C['text3']};margin-top:6px;">
-                Configura tu modelo y presiona Resolver
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+    # HTML flush-left para evitar el problema de markdown con indentación
+    st.markdown(
+        f'<div style="text-align:center;padding:48px 24px;color:{C["text3"]};'
+        f'font-family:\'DM Sans\',sans-serif;font-size:0.88rem;'
+        f'border:1px dashed {C["border2"]};border-radius:12px;margin-top:8px;">'
+        f'<div style="font-size:2rem;margin-bottom:12px;opacity:0.3;">∑</div>'
+        f'<div>Los resultados aparecerán aquí</div>'
+        f'<div style="font-size:0.78rem;color:{C["text3"]};margin-top:6px;">'
+        f'Configura tu modelo y presiona Resolver'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
 
 def render_ai_input():
     # === Modo IA: el usuario describe el problema en lenguaje natural ===
@@ -859,16 +976,24 @@ def render_ai_input():
                         result = parse_problem(problem_text)
 
                         if "error" in result:
-                            st.error(f"No se pudo interpretar el problema: {result['error']}")
+                            _render_ai_error(result)
                         else:
                             # Mostrar explicación de cómo interpretó la IA
                             st.session_state.ai_result = None
                             st.session_state.ai_model_display = result["model"]
                             st.session_state.ai_explanation = result["explanation"]
 
-                            # Resolver el modelo
-                            from core.solver import solve
-                            st.session_state.ai_result = solve(result["model"])
+                            # Resolver el modelo (envuelto por si el solver
+                            # también explota con datos raros)
+                            try:
+                                from core.solver import solve
+                                st.session_state.ai_result = solve(result["model"])
+                            except Exception as e:
+                                _render_ai_error({
+                                    "error": True,
+                                    "kind": "invalid",
+                                    "technical": f"El solver falló: {e}",
+                                })
         with btn_clear_col:
             st.button("Limpiar", key="ai_clear_btn",
                       on_click=clear_session_keep_mode)
@@ -913,4 +1038,14 @@ def render_ai_input():
                 f'{rest_html}'
                 f'</div>',
                 unsafe_allow_html=True
+            )
+
+            # Botón para llevar este modelo al modo Manual y editarlo
+            st.markdown('<div style="margin-top:14px;"></div>',
+                        unsafe_allow_html=True)
+            st.button(
+                "Editar en Manual →",
+                key="edit_manual_btn",
+                on_click=edit_ai_model_in_manual,
+                help="Carga este modelo en el modo Manual para ajustar valores"
             )

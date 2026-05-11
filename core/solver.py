@@ -50,7 +50,7 @@ def _interpret_result(result, model: LPModel) -> SolverResult:
     # Mapear los codigos de scipy a mensajes legibles
     status_map = {
         0: "Solución óptima encontrada",
-        1: "No se alcanzó la iteración límite",
+        1: "Se alcanzó el límite de iteraciones sin converger",
         2: "Modelo no factible",
         3: "Modelo no acotado",
         4: "Error numérico",
