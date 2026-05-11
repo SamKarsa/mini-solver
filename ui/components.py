@@ -3,6 +3,19 @@ import streamlit as st
 from core.model import LPModel, Restriction
 
 
+def clear_session_keep_mode():
+    """Limpia todo el session_state excepto la selección de modo (Manual/IA).
+    Bumpea un contador para el textarea de IA — algunos widgets de texto
+    de Streamlit no se rehidratan aunque su key se borre del session_state,
+    así que al cambiar la key se fuerza un mount nuevo y queda vacío."""
+    mode = st.session_state.get("mode", "Manual")
+    ai_textarea_version = st.session_state.get("ai_textarea_version", 0) + 1
+    for k in list(st.session_state.keys()):
+        if k != "mode":
+            del st.session_state[k]
+    st.session_state.ai_textarea_version = ai_textarea_version
+
+
 _FONTS_URL = (
     "https://fonts.googleapis.com/css2?"
     "family=DM+Serif+Display&"
@@ -120,6 +133,50 @@ def apply_styles():
                 background: {C['border']} !important;
                 color: {C['text']} !important;
                 border-color: {C['indigo']} !important;
+            }}
+
+            /* === Radio selector de modo: pills con círculo === */
+            .stRadio > div[role="radiogroup"] {{
+                gap: 10px !important;
+                background: transparent !important;
+                padding: 0 !important;
+            }}
+            .stRadio [role="radiogroup"] > label {{
+                background: {C['surface2']} !important;
+                border: 1px solid {C['border']} !important;
+                border-radius: 999px !important;
+                padding: 7px 18px 7px 12px !important;
+                cursor: pointer !important;
+                margin: 0 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                gap: 6px !important;
+                transition: all 0.15s ease !important;
+            }}
+            .stRadio [role="radiogroup"] > label:hover {{
+                border-color: {C['border2']} !important;
+                background: {C['input']} !important;
+            }}
+            .stRadio [role="radiogroup"] > label p {{
+                font-family: 'DM Sans', sans-serif !important;
+                font-size: 0.88rem !important;
+                font-weight: 500 !important;
+                color: {C['text2']} !important;
+                margin: 0 !important;
+            }}
+            /* Opción seleccionada: borde y texto índigo */
+            .stRadio [role="radiogroup"] > label:has(input:checked) {{
+                background: {C['input']} !important;
+                border-color: {C['indigo']} !important;
+                box-shadow: 0 0 0 3px rgba(67, 56, 202, 0.10) !important;
+            }}
+            .stRadio [role="radiogroup"] > label:has(input:checked) p {{
+                color: {C['indigo']} !important;
+                font-weight: 600 !important;
+            }}
+            /* El círculo visual del radio (BaseWeb) */
+            .stRadio [role="radiogroup"] > label > div:first-child {{
+                background: transparent !important;
             }}
 
             /* === Selectbox === */
@@ -748,3 +805,112 @@ def render_empty_results():
             </div>
         </div>
     """, unsafe_allow_html=True)
+
+def render_ai_input():
+    # === Modo IA: el usuario describe el problema en lenguaje natural ===
+    with st.container(border=True):
+        st.markdown('<div class="section-title">01 · Describe tu problema</div>',
+                    unsafe_allow_html=True)
+
+        st.markdown(
+            f'<div style="font-size:0.78rem;color:{C["text3"]};margin-bottom:14px;">'
+            f'Describe el problema en lenguaje natural. La IA extraerá las variables, '
+            f'la función objetivo y las restricciones automáticamente.</div>',
+            unsafe_allow_html=True
+        )
+
+        # Key versionada: al limpiar se incrementa el contador, lo que fuerza
+        # a Streamlit a montar el widget como nuevo (y por tanto vacío)
+        textarea_version = st.session_state.get("ai_textarea_version", 0)
+        problem_text = st.text_area(
+            "Problema",
+            placeholder=(
+                "Ejemplo: Una fábrica produce sillas y mesas. "
+                "Cada silla genera $3 de ganancia y toma 2 horas de trabajo. "
+                "Cada mesa genera $5 y toma 3 horas. "
+                "Hay 12 horas disponibles y máximo 4 sillas. "
+                "¿Cuánto producir para maximizar la ganancia?"
+            ),
+            height=160,
+            label_visibility="collapsed",
+            key=f"ai_problem_text_{textarea_version}"
+        )
+
+        # Disclaimer estilo ChatGPT
+        st.markdown(
+            f'<div style="font-size:0.75rem;color:{C["text3"]};margin:10px 0 14px;'
+            f'display:flex;align-items:flex-start;gap:8px;line-height:1.5;">'
+            f'<span style="color:{C["orange"]};font-weight:700;font-size:0.85rem;'
+            f'line-height:1;">!</span>'
+            f'<span>La IA puede cometer errores al interpretar el problema. '
+            f'Verifica el modelo extraído antes de confiar en los resultados.</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+        btn_solve_col, btn_clear_col, _ = st.columns([2, 1, 5])
+        with btn_solve_col:
+            if st.button("Interpretar y Resolver", type="primary", key="ai_solve_btn"):
+                if not problem_text.strip():
+                    st.warning("Por favor describe el problema antes de continuar.")
+                else:
+                    with st.spinner("Interpretando el problema..."):
+                        from core.ai_parser import parse_problem
+                        result = parse_problem(problem_text)
+
+                        if "error" in result:
+                            st.error(f"No se pudo interpretar el problema: {result['error']}")
+                        else:
+                            # Mostrar explicación de cómo interpretó la IA
+                            st.session_state.ai_result = None
+                            st.session_state.ai_model_display = result["model"]
+                            st.session_state.ai_explanation = result["explanation"]
+
+                            # Resolver el modelo
+                            from core.solver import solve
+                            st.session_state.ai_result = solve(result["model"])
+        with btn_clear_col:
+            st.button("Limpiar", key="ai_clear_btn",
+                      on_click=clear_session_keep_mode)
+
+    # Mostrar cómo interpretó la IA el modelo
+    if "ai_explanation" in st.session_state and st.session_state.ai_explanation:
+        with st.container(border=True):
+            st.markdown('<div class="section-title">02 · Modelo interpretado</div>',
+                        unsafe_allow_html=True)
+
+            st.markdown(
+                f'<div style="font-size:0.85rem;color:{C["text2"]};'
+                f'background:{C["surface2"]};border-left:3px solid {C["indigo"]};'
+                f'border-radius:6px;padding:12px 16px;margin-bottom:16px;">'
+                f'{st.session_state.ai_explanation}</div>',
+                unsafe_allow_html=True
+            )
+
+            # Mostrar el modelo extraído (todo el HTML en un solo st.markdown
+            # para que el contenedor envuelva tanto Z como las restricciones)
+            model = st.session_state.ai_model_display
+            var_str = " + ".join([
+                f"{c}·{v}"
+                for c, v in zip(model.objective_coefficients, model.variables)
+            ])
+            rest_html = "".join(
+                f'<div style="font-size:0.82rem;color:{C["text2"]};margin-top:4px;">'
+                f'R{i+1}: '
+                + " + ".join(
+                    f"{c}·{v}" for c, v in zip(r.coefficients, model.variables)
+                )
+                + f' <span style="color:{C["text3"]};">{r.type}</span> {r.rhs}'
+                + '</div>'
+                for i, r in enumerate(model.restrictions)
+            )
+            st.markdown(
+                f'<div style="font-family:JetBrains Mono,monospace;font-size:0.85rem;'
+                f'color:{C["text"]};background:{C["surface2"]};border-radius:6px;'
+                f'padding:14px 18px;line-height:1.8;">'
+                f'<div><span style="color:{C["orange"]};font-weight:600;">{model.sense}</span> '
+                f'Z = {var_str}</div>'
+                f'{rest_html}'
+                f'</div>',
+                unsafe_allow_html=True
+            )
